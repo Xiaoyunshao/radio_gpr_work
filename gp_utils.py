@@ -25,6 +25,9 @@ def load_uvdata(dfile, bls=None, freq_chans=None, time_ints=None, pols=None, inf
     ants = uvd.telescope.antenna_numbers
     antp = dict(zip(ants.tolist(), torch.as_tensor(antpos, device=device, dtype=dtype)))
 
+    # ensure (ant1<ant2) conjugation
+    uvd.conjugate_bls('ant1<ant2')
+
     # inflate to redundancies
     if inflate_by_red:
         uvd.inflate_by_redundancy()
