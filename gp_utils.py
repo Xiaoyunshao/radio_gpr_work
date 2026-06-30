@@ -1,6 +1,10 @@
 import numpy as np
 import torch
 
+import bayeslim as ba
+from bayeslim import VisData, telescope_model, dataset
+import gprlim
+
 
 def load_uvdata(dfile, bls=None, freq_chans=None, time_ints=None, pols=None, inflate_by_red=False, device=None, dtype=None):
     """
@@ -10,52 +14,102 @@ def load_uvdata(dfile, bls=None, freq_chans=None, time_ints=None, pols=None, inf
     ----------
     dfile : str
         Filepath to UVH5 dataset.
+
+    Returns
+    -------
+    data, info
     """
-    from pyuvdata import UVData
+    try:
+        from pyuvdata import UVData
+        # load uvdata
+        uvd = UVData()
 
-    # load uvdata
-    uvd = UVData()
-    uvd.read(dfile, bls=bls, freq_chans=freq_chans, polarizations=pols)
+        # get antenna metadata
+        uvd.read(dfile, freq_chans=freq_chans, polarizations=pols, read_data=False, axis='blt')
+        antpos, ants = uvd.get_enu_data_ants()
+        antp = dict(zip(ants.tolist(), torch.as_tensor(antpos, device=device, dtype=dtype)))
+        all_bls = uvd.get_antpairs()
 
-    if time_ints is not None:
-        uvd.select(times=np.unique(uvd.time_array)[time_ints])
+        # now load the data
+        uvd.read(dfile, bls=bls, freq_chans=freq_chans, polarizations=pols)
 
-    # get antenna dictionary
-    antpos = uvd.telescope.get_enu_antpos()
-    ants = uvd.telescope.antenna_numbers
-    antp = dict(zip(ants.tolist(), torch.as_tensor(antpos, device=device, dtype=dtype)))
+        if time_ints is not None:
+            uvd.select(times=np.unique(uvd.time_array)[time_ints])
 
-    # ensure (ant1<ant2) conjugation
-    uvd.conjugate_bls('ant1<ant2')
+        # ensure (ant1<ant2) conjugation
+        uvd.conjugate_bls('ant1<ant2')
 
-    # inflate to redundancies
-    if inflate_by_red:
-        uvd.inflate_by_redundancy()
+        # inflate to redundancies
+        if inflate_by_red:
+            uvd.inflate_by_redundancy()
 
-    # unravel to (Nbls, Ntimes, Nfreqs, Npols) and convert to tensor
-    data = uvd.data_array.reshape(uvd.Ntimes, uvd.Nbls, uvd.Nfreqs, uvd.Npols)
-    data = np.moveaxis(data, 0, 1)
+        # unravel to (Npols, 1, Nbls, Ntimes, Nfreqs) and convert to tensor
+        data = uvd.data_array.reshape(uvd.Ntimes, uvd.Nbls, uvd.Nfreqs, uvd.Npols)
+        data = np.moveaxis(data, 0, 1)
+        data = np.moveaxis(data, -1, 0)[:, None]
 
-    # convert to torch tensor
-    data = torch.as_tensor(data, device=device, dtype=dtype)
+        # get metadata
+        bls = uvd.get_antpairs()
+        freqs = uvd.freq_array
+        times = np.unique(uvd.time_array)
+        lsts = np.unique(np.unwrap(uvd.lst_array))
+        lat, lon, alt = uvd.telescope.location_lat_lon_alt_degrees
+        pols = uvd.polarization_array.tolist()
+
+        vd = ba.VisData()
+        telescope = telescope_model.TelescopeModel((lon, lat, alt))
+        vd.setup_meta(telescope, antp)
+        vd.setup_data(bls, times, freqs, pol=pols, data=torch.as_tensor(data))
+
+    except ValueError:
+        # load BayesLIM VisData
+
+        # get metadata
+        vd = VisData.from_hdf5(dfile, read_data=False)
+        vd = dataset.concat_VisData(vd, 'time')
+        all_bls = vd.bls
+
+        # now load data
+        vd = VisData.from_hdf5(dfile, bl=bls, freq_inds=freq_chans, pol=pols)
+        vd = dataset.concat_VisData(vd, 'time')
+
+        if time_ints is not None:
+            vd.select(time_inds=time_ints, inplace=True)
+
+        # get metadata
+        bls = vd.bls
+        freqs = vd.freqs
+        times = np.unique(vd.times)
+        lon, lat = vd.telescope.location[:2]
+        lsts = telescope_model.JD2LST(vd.times, lon)
+        pols = vd.pol
+
+        # get antenna dictionary
+        antp = vd.antpos
+
+    # convert to dtype and/or device
+    vd.push(dtype)
+    vd.push(device)
 
     # get redundancies
-    from hera_cal.redcal import get_pos_reds
-    reds = get_pos_reds(antp, include_autos=True)
+    from bayeslim.telescope_model import build_reds
+    reds = build_reds(antp)[0]
 
     # get metadata
     meta = {
         'antp': antp,
-        'bls': uvd.get_antpairs(),
-        'freqs': torch.as_tensor(uvd.freq_array, device=device, dtype=dtype),
-        'times': torch.as_tensor(np.unique(uvd.time_array), device=device, dtype=dtype),
-        'lsts': torch.as_tensor(np.unique(np.unwrap(uvd.lst_array)), device=device, dtype=dtype),
+        'bls': bls,
+        'all_bls': all_bls,
+        'freqs': torch.as_tensor(freqs, device=device, dtype=dtype),
+        'times': torch.as_tensor(times, device=device, dtype=dtype),
+        'lsts': torch.as_tensor(lsts, device=device, dtype=dtype),
         'reds': reds,
-        'lat': uvd.telescope.location_lat_lon_alt_degrees[0],
-        'lon': uvd.telescope.location_lat_lon_alt_degrees[1],
+        'lat': lat,
+        'lon': lon,
+        'pols': pols
     }
 
-    return data, meta
+    return vd, meta
 
 
 def compute_noise_var(auto, dt, dnu):
@@ -236,3 +290,123 @@ def _top2eq_m(ha, dec):
 
     return mat
 
+
+def get_leaf_ants(antpos):
+    """return lower leaf of full HERA split-hex array. antpos must be only hera 320 core."""
+    antpos = antpos - antpos.mean(0)
+    th = -np.pi/6
+    _R = np.array([[np.cos(th), -np.sin(th)],[np.sin(th), np.cos(th)]])
+    leaf = (antpos[:, 1] < 5) & ((_R @ antpos[:, :2].T).T[:, 0] < 10)
+    return leaf
+
+
+
+def inpaint_freq_1d(vd, flags, freq_kernel, inv_wgts, method='woodbury', rcond=1e-12, **kwargs):
+    """
+    Frequency-only inpainting
+
+    Parameters
+    ----------
+    vd : bayeslim.VisData
+    flags : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    freq_kernel : Kernel
+    inv_wgts : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    """
+    # inpaint along freq
+    inp_y, mdl = gprlim.models.inpaint_1d(
+        freq_kernel, vd.freqs/1e6, vd.data[0,0]*~flags, inv_wgts, flags, dim=-1, method=method, rcond=rcond, **kwargs
+    )
+
+    return inp_y, mdl
+
+
+def inpaint_time_freq_1d(
+    vd, flags, time_kernel, freq_kernel, inv_wgts, method='woodbury', rcond=1e-12, noise_mult=100, **kwargs
+    ):
+    """
+    Time 1D inpaint, then freq 1D inpaint
+
+
+    Parameters
+    ----------
+    vd : bayeslim.VisData
+    flags : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    time_kernel : Kernel
+    freq_kernel : Kernel
+    inv_wgts : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    """
+    times = (vd.times - vd.times[0]) * 24 * 3600
+    inp_y, mdl = gprlim.models.inpaint_1d(
+        time_kernel, times, vd.data[0,0]*~flags, inv_wgts, flags, dim=-2, method=method, rcond=rcond, **kwargs
+    )
+    fully_flagged = (flags.all(dim=1, keepdim=True)).expand_as(flags)
+    inv_wgts[flags & ~fully_flagged] = inv_wgts[~flags].mean() * noise_mult
+
+    inp_y, mdl = gprlim.models.inpaint_1d(
+        freq_kernel, vd.freqs/1e6, inp_y, inv_wgts, flags, dim=-1, method=method, rcond=rcond, **kwargs
+    )
+
+    return inp_y, mdl
+
+
+def inpaint_time_freq_2d(
+    vd, flags, time_kernel, freq_kernel, inv_wgts, method='cg', cg_tol=1e-3, n_threads=8, **kwargs
+    ):
+    """
+    Joint 2D inpainting
+
+    Parameters
+    ----------
+    vd : bayeslim.VisData
+    flags : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    time_kernel : Kernel
+    freq_kernel : Kernel
+    inv_wgts : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    """
+    times = (vd.times - vd.times[0]) * 24 * 3600
+    inp_y, mdl = gprlim.models.inpaint_2d(
+        time_kernel, freq_kernel, times, vd.freqs/1e6, vd.data[0,0]*~flags, inv_wgts, flags,
+        method=method, cg_tol=cg_tol, cg_max_iter=100000, n_threads=n_threads, **kwargs
+    )
+
+    return inp_y, mdl
+
+def inpaint_time_freq_2d_freq_1d(
+    vd, flags, time_kernel, freq_kernel, inv_wgts, cg_tol=1e-3, rcond=1e-12, n_threads=8, noise_mult=100, **kwargs
+    ):
+    """
+    CG 2D inpaint, then 1D freq inpaint
+
+    Parameters
+    ----------
+    vd : bayeslim.VisData
+    flags : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    time_kernel : Kernel
+    freq_kernel : Kernel
+    inv_wgts : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    """
+    # first do joint 2D inpaint
+    times = (vd.times - vd.times[0]) * 24 * 3600
+    inp_y, mdl = gprlim.models.inpaint_2d(
+        time_kernel, freq_kernel, times, vd.freqs/1e6, vd.data[0,0]*~flags, inv_wgts, flags,
+        method='cg', cg_tol=cg_tol, cg_max_iter=100000, n_threads=n_threads, **kwargs
+    )
+
+    # now use it as prior for freq only inpaint
+    inv_wgts = inv_wgts.clone()
+    inv_wgts[flags] = inv_wgts[~flags].mean() * noise_mult
+
+    # inpaint along freq
+    inp_y, mdl = gprlim.models.inpaint_1d(
+        freq_kernel, vd.freqs/1e6, inp_y, inv_wgts, flags, dim=-1, method='woodbury', rcond=rcond, **kwargs
+    )
+
+    return inp_y, mdl
