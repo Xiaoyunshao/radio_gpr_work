@@ -300,6 +300,27 @@ def get_leaf_ants(antpos):
     return leaf
 
 
+def inpaint_time_1d(vd, flags, time_kernel, inv_wgts, method='woodbury', rcond=1e-12, **kwargs):
+    """
+    Time-only inpainting
+
+    Parameters
+    ----------
+    vd : bayeslim.VisData
+    flags : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    time_kernel : Kernel
+    inv_wgts : tensor
+        Shape (-1, Ntimes, Nfreqs)
+    """
+    # inpaint along freq
+    times = (vd.times - vd.times[0]) * 24 * 3600
+    inp_y, mdl = gprlim.models.inpaint_1d(
+        time_kernel, times, vd.data[0,0]*~flags, inv_wgts, flags, dim=-2, method=method, rcond=rcond, **kwargs
+    )
+
+    return inp_y, mdl
+
 
 def inpaint_freq_1d(vd, flags, freq_kernel, inv_wgts, method='woodbury', rcond=1e-12, **kwargs):
     """
@@ -343,6 +364,9 @@ def inpaint_time_freq_1d(
     inp_y, mdl = gprlim.models.inpaint_1d(
         time_kernel, times, vd.data[0,0]*~flags, inv_wgts, flags, dim=-2, method=method, rcond=rcond, **kwargs
     )
+
+    # update weights to use inp_y as starting guess (except for fully flagged channels)
+    inv_wgts = inv_wgts.clone()
     fully_flagged = (flags.all(dim=1, keepdim=True)).expand_as(flags)
     inv_wgts[flags & ~fully_flagged] = inv_wgts[~flags].mean() * noise_mult
 
@@ -354,7 +378,7 @@ def inpaint_time_freq_1d(
 
 
 def inpaint_time_freq_2d(
-    vd, flags, time_kernel, freq_kernel, inv_wgts, method='cg', cg_tol=1e-3, n_threads=8, **kwargs
+    vd, flags, time_kernel, freq_kernel, inv_wgts, method='cg', cg_tol=1e-3, n_threads=1, **kwargs
     ):
     """
     Joint 2D inpainting
@@ -378,7 +402,7 @@ def inpaint_time_freq_2d(
     return inp_y, mdl
 
 def inpaint_time_freq_2d_freq_1d(
-    vd, flags, time_kernel, freq_kernel, inv_wgts, cg_tol=1e-3, rcond=1e-12, n_threads=8, noise_mult=100, **kwargs
+    vd, flags, time_kernel, freq_kernel, inv_wgts, cg_tol=1e-3, rcond=1e-12, n_threads=1, noise_mult=100, **kwargs
     ):
     """
     CG 2D inpaint, then 1D freq inpaint
@@ -400,13 +424,14 @@ def inpaint_time_freq_2d_freq_1d(
         method='cg', cg_tol=cg_tol, cg_max_iter=100000, n_threads=n_threads, **kwargs
     )
 
-    # now use it as prior for freq only inpaint
+    # now use it as prior for freq only inpaint: keep fully flagged chans flagged
     inv_wgts = inv_wgts.clone()
-    inv_wgts[flags] = inv_wgts[~flags].mean() * noise_mult
+    fully_flagged = (flags.all(dim=1, keepdim=True)).expand_as(flags)
+    inv_wgts[flags & ~fully_flagged] = inv_wgts[~flags].mean() * noise_mult
 
     # inpaint along freq
     inp_y, mdl = gprlim.models.inpaint_1d(
-        freq_kernel, vd.freqs/1e6, inp_y, inv_wgts, flags, dim=-1, method='woodbury', rcond=rcond, **kwargs
+        freq_kernel, vd.freqs/1e6, inp_y, inv_wgts, flags, dim=-1, method='woodbury', rcond=rcond,
     )
 
     return inp_y, mdl
