@@ -112,6 +112,107 @@ def load_uvdata(dfile, bls=None, freq_chans=None, time_ints=None, pols=None, inf
     return vd, meta
 
 
+def simulate_flags(flag_types, Nflags, Ntimes, Nfreqs, seed=None):
+    """
+    flag_types : list
+        'narrowband_full_time'
+        'wideband_full_time'
+        'ultraband_short_time'
+        'fullband_short_time'
+        'narrowband_short_time'
+        'narrowband_long_time'
+        'wideband_long_time'
+        'randn'
+    Nflags : list
+        The number of flags to generate
+    Ntimes : int
+    Nfreqs : int
+    
+    Example:
+        flag_types = ['narrowband_full_time', 'randn']
+        Nflags = [10, 100]
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    flags = torch.zeros((1, Ntimes, Nfreqs), dtype=torch.bool)
+    
+    for flag, N in zip(flag_types, Nflags):
+    
+        if flag == 'narrowband_full_time':
+            # 1 channel wide, all times
+            rand = torch.randint(low=0, high=Nfreqs, size=(N,))
+            flags[:, :, rand] = True
+
+        if flag == 'wideband_full_time':
+            # 10-20 channels wide, all times
+            start = torch.randint(low=0, high=Nfreqs, size=(N,))
+            width = torch.randint(low=10, high=20, size=(N,))
+            for s, w in zip(start, width):
+                flags[:, :, s:s+w] = True
+
+        if flag == 'ultraband_short_time':
+            # 20-40 wide, 1-4 time integrations
+            start = torch.randint(low=0, high=Nfreqs, size=(N,))
+            width = torch.randint(low=20, high=40, size=(N,))
+            _time = torch.randint(low=0, high=Ntimes, size=(N,))
+            for s, w, t in zip(start, width, _time):
+                flags[:, t:t+3, s:s+w] = True
+
+        if flag == 'fullband_short_time':
+            # all channels wide, 1-3 time integrations
+            rand = torch.randint(low=0, high=Ntimes, size=(N,))
+            flags[:, rand] = True
+
+        if flag == 'narrowband_short_time':
+            # 1-3 channels wide, 3-10 time integrations
+            rand = torch.randint(low=0, high=Nfreqs, size=(N,))
+            _time = torch.randint(low=0, high=Ntimes, size=(N,))
+            for r, t in zip(rand, _time):
+                flags[:, t:t+10, r:r+2] = True
+
+        if flag == 'narrowband_long_time':
+            # 1-3 channels wide, 75 time integrations
+            start = torch.randint(low=0, high=Nfreqs, size=(N,))
+            width = torch.randint(low=60, high=80, size=(N,))
+            _time = torch.randint(low=0, high=Ntimes, size=(N,))
+            for s, w, t in zip(start, width, _time):
+                flags[:, t:t+w, s:s+3] = True
+
+        if flag == 'wideband_long_time':
+            # 10-20 channels wide, 20-30 time integrations
+            start = torch.randint(low=0, high=Nfreqs, size=(N,))
+            width = torch.randint(low=10, high=20, size=(N,))
+            _time = torch.randint(low=0, high=Ntimes, size=(N,))
+            for s, w, t in zip(start, width, _time):
+                flags[:, t:t+25, s:s+w] = True
+
+        if flag == 'randn':
+            rand = np.random.choice(np.arange(flags.numel()), size=500, replace=False)
+            flags.ravel()[rand] = True
+
+    return flags
+
+
+def dpss_inpaint():
+    """
+    Inpaint with DPSS
+
+    """
+    # TODO
+    pass
+
+
+
+def lsq_inpaint():
+    """
+    Inpaint with polynomial least squares
+    """
+    # TODO
+    pass
+
+
+
 def compute_noise_var(auto, dt, dnu):
     """
     Compute noise variance for cross-correlation visibilities
