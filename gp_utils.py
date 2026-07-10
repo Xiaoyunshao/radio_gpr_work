@@ -24,14 +24,16 @@ def load_uvdata(dfile, bls=None, freq_chans=None, time_ints=None, pols=None, inf
         # load uvdata
         uvd = UVData()
 
+        no_checks = dict(run_check=False, run_check_acceptability=False, check_extra=False, check_autos=False)
+
         # get antenna metadata
-        uvd.read(dfile, freq_chans=freq_chans, polarizations=pols, read_data=False, axis='blt')
+        uvd.read(dfile, freq_chans=freq_chans, polarizations=pols, read_data=False, axis='blt', **no_checks)
         antpos, ants = uvd.get_enu_data_ants()
         antp = dict(zip(ants.tolist(), torch.as_tensor(antpos, device=device, dtype=dtype)))
         all_bls = uvd.get_antpairs()
 
         # now load the data
-        uvd.read(dfile, bls=bls, freq_chans=freq_chans, polarizations=pols)
+        uvd.read(dfile, bls=bls, freq_chans=freq_chans, polarizations=pols, **no_checks)
 
         if time_ints is not None:
             uvd.select(times=np.unique(uvd.time_array)[time_ints])
