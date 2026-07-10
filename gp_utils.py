@@ -188,7 +188,7 @@ def simulate_flags(flag_types, Nflags, Ntimes, Nfreqs, seed=None):
                 flags[:, t:t+25, s:s+w] = True
 
         if flag == 'randn':
-            rand = np.random.choice(np.arange(flags.numel()), size=500, replace=False)
+            rand = np.random.choice(np.arange(flags.numel()), size=N, replace=False)
             flags.ravel()[rand] = True
 
     return flags
