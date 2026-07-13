@@ -452,7 +452,6 @@ def inpaint_time_freq_1d(
     """
     Time 1D inpaint, then freq 1D inpaint
 
-
     Parameters
     ----------
     vd : bayeslim.VisData
@@ -538,3 +537,28 @@ def inpaint_time_freq_2d_freq_1d(
     )
 
     return inp_y, mdl
+
+
+def dpss_inpaint_1d(vd, flags, inv_wgts, bl_len, buffer=0, suppression=1e-12):
+    """
+    DPSS inpaint
+    """
+    from hera_filters import dspec
+    hw = bl_len / 2.99e8 * 1e9 + buffer
+
+    d = vd.data[0,0] * ~flags
+    mdl = []
+    for i in range(vd.data.shape[-3]):
+        mdl.append(dspec.fourier_filter(
+            vd.freqs.numpy()/1e6, d[i].numpy(), 1/inv_wgts[0].numpy(),
+            [0], [hw*1e-3], mode='dpss_solve', filter_dims=-1,
+            suppression_factors=[suppression], eigenval_cutoff=[suppression],
+        )[0])
+    mdl = torch.as_tensor(np.array(mdl))
+    inp_y = d.clone()
+    f = flags.expand(mdl.shape)
+    inp_y[f] = mdl[f]
+
+    return inp_y, mdl
+
+
